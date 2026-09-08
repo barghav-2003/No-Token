@@ -63,7 +63,9 @@ class CloudMeshRouter:
             
             for key in keys:
                 if (provider, key) not in self.key_status:
-                    self.key_status[(provider, key)] = {"status": "Online", "cooldown_until": 0.0}
+                    self.key_status[(provider, key)] = {"status": "Online", "cooldown_until": 0.0, "failure_count": 0}
+                else:
+                    self.key_status[(provider, key)]["failure_count"] = 0
             
             # Perform Model Auto-Discovery
             if keys:
@@ -114,9 +116,12 @@ class CloudMeshRouter:
                         flash_models.append(name.replace("models/", ""))
                 
                 if flash_models:
-                    # Sort alphabetically, which conveniently places higher versions (3.6) above lower (1.5)
-                    flash_models.sort(reverse=True)
+                    preferred_gemini = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
                     best_gemini = flash_models[0]
+                    for preferred in preferred_gemini:
+                        if preferred in flash_models:
+                            best_gemini = preferred
+                            break
                     self.discovered_models[provider] = best_gemini
                     logging.info(f"[Gemini] Auto-discovered model: {best_gemini}")
                     return
@@ -185,33 +190,57 @@ class CloudMeshRouter:
     def _handle_api_error(self, e: Exception, provider: str, key: str, key_suffix: str):
         err_msg = str(e).lower()
         is_rate_limit = False
-        is_auth_error = False
+        is_auth_or_quota_exhausted = False
         
-        if provider == "Gemini" and isinstance(e, genai_errors.APIError):
+        # Hard quota or permanently invalid key indicators
+        hard_quota_indicators = [
+            "quota exceeded", "exceeded your current quota", "limit: 0", 
+            "insufficient_quota", "daily quota", "access_token_type_unsupported",
+            "not_found", "model is no longer available"
+        ]
+        
+        if any(h in err_msg for h in hard_quota_indicators):
+            is_auth_or_quota_exhausted = True
+        elif provider == "Gemini" and isinstance(e, genai_errors.APIError):
             if e.code == 429:
-                is_rate_limit = True
-            elif e.code in [401, 403]:
-                is_auth_error = True
+                # If message contains limit: 0 or quota exceeded, it's not a burst limit
+                if any(h in err_msg for h in hard_quota_indicators):
+                    is_auth_or_quota_exhausted = True
+                else:
+                    is_rate_limit = True
+            elif e.code in [401, 403, 404]:
+                is_auth_or_quota_exhausted = True
         elif isinstance(e, openai.RateLimitError):
             is_rate_limit = True
         elif isinstance(e, openai.AuthenticationError):
-            is_auth_error = True
+            is_auth_or_quota_exhausted = True
         elif "429" in err_msg or "rate limit" in err_msg or "resource_exhausted" in err_msg:
-            is_rate_limit = True
-        elif "401" in err_msg or "403" in err_msg or "unauthorized" in err_msg or "402" in err_msg or "insufficient_quota" in err_msg:
-            is_auth_error = True
-        
-        if is_rate_limit:
-            logging.warning(f"[{provider}] Rate Limit Exceeded for key ...{key_suffix}. Cooling down for 60s.")
-            self.key_status[(provider, key)]["status"] = "Cooling Down"
-            self.key_status[(provider, key)]["cooldown_until"] = time.time() + 60.0
-        elif is_auth_error:
-            logging.warning(f"[{provider}] Authentication/Quota Error for key ...{key_suffix}: {e}. Marking as Exhausted.")
-            self.key_status[(provider, key)]["status"] = "Exhausted"
+            if any(h in err_msg for h in hard_quota_indicators):
+                is_auth_or_quota_exhausted = True
+            else:
+                is_rate_limit = True
+        elif "401" in err_msg or "403" in err_msg or "unauthorized" in err_msg or "402" in err_msg:
+            is_auth_or_quota_exhausted = True
+
+        status_info = self.key_status.setdefault((provider, key), {"status": "Online", "cooldown_until": 0.0, "failure_count": 0})
+        fail_count = status_info.get("failure_count", 0) + 1
+        status_info["failure_count"] = fail_count
+
+        if provider == "Groq" and key.startswith("xai-"):
+            logging.warning(f"[Groq] Key ...{key_suffix} starts with 'xai-' (xAI Grok key), not a Groq key (which starts with 'gsk_'). Please use a valid Groq key.")
+
+        if is_auth_or_quota_exhausted or fail_count >= 3:
+            logging.warning(f"[{provider}] Authentication or Hard Quota Exhaustion for key ...{key_suffix} (fails: {fail_count}): {e}. Marking as Exhausted.")
+            status_info["status"] = "Exhausted"
+        elif is_rate_limit:
+            backoff = min(60.0 * fail_count, 300.0)
+            logging.warning(f"[{provider}] Rate Limit Exceeded for key ...{key_suffix} (attempt {fail_count}). Cooling down for {int(backoff)}s.")
+            status_info["status"] = "Cooling Down"
+            status_info["cooldown_until"] = time.time() + backoff
         else:
             logging.warning(f"[{provider}] API Error for key ...{key_suffix}: {e}. Cooling down for 60s.")
-            self.key_status[(provider, key)]["status"] = "Cooling Down"
-            self.key_status[(provider, key)]["cooldown_until"] = time.time() + 60.0
+            status_info["status"] = "Cooling Down"
+            status_info["cooldown_until"] = time.time() + 60.0
 
     def generate_content(self, payload_kwargs: dict, required_tokens: int = 0) -> Tuple[str, ContextPayload, dict]:
         """Iterates over the mesh, generating content and falling back on errors."""
@@ -256,6 +285,7 @@ class CloudMeshRouter:
                     )
                     response_text = response.choices[0].message.content or ""
                 
+                self.key_status.get((provider, key), {})["failure_count"] = 0
                 metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
                 return response_text, payload, metadata
                 
@@ -305,6 +335,7 @@ class CloudMeshRouter:
                             logging.error(f"[Gemini] Stream interrupted mid-flight: {err}")
                             yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
+                    self.key_status.get((provider, key), {})["failure_count"] = 0
                     metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
                     return gen(client, iterator, first_chunk), payload, metadata
                 else:
@@ -332,6 +363,7 @@ class CloudMeshRouter:
                             logging.error(f"[{p_name}] Stream interrupted mid-flight: {err}")
                             yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
+                    self.key_status.get((provider, key), {})["failure_count"] = 0
                     metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
                     return generate(iterator, first_content, provider), payload, metadata
                 
