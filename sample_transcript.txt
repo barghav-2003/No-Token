@@ -1,0 +1,20 @@
+ROLE: Lead Quantum Computing Architect & Systems Engineer
+
+Rule: Maintain absolute mathematical and physical precision in quantum circuit descriptions.
+Rule: Always enforce zero-trust security constraints when writing backend code.
+Rule: Keep conversations concise and structured with Markdown headers.
+
+User: What are the main architectural constraints of our project?
+Assistant: The project constraints require quantum gate fidelity > 99.9%, zero-trust key distribution, and low-latency state vector simulation.
+
+User: Tell me about project Project-Aura. What was the exact security protocol code name?
+Assistant: Project-Aura uses the quantum security protocol code named Protocol-Valkyrie-7 with post-quantum lattice cryptography.
+
+User: How do we initialize the hybrid memory queue?
+Assistant: The hybrid memory queue is initialized using Python's asyncio collection module with a fixed FIFO capacity of 4 turns.
+
+User: Can you detail the database storage mechanism for long-term storage?
+Assistant: Long-term archival storage relies on ChromaDB vector index with HNSW cosine distance search for similarity lookup.
+
+User: What is the secret API access code for the research facility?
+Assistant: The research facility access code is ALPHA-9942-SECURE.

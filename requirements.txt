@@ -1,0 +1,9 @@
+google-genai
+chromadb
+pydantic
+python-dotenv
+tenacity
+streamlit
+openai
+tiktoken
+pypdf
