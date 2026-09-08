@@ -33,7 +33,7 @@ class CloudMeshRouter:
         self.tiers = [
             {"provider": "Groq", "env_var": "GROQ_API_KEYS", "base_url": "https://api.groq.com/openai/v1", "fallback_model": "llama-3.3-70b-versatile", "context_limit": 128000},
             {"provider": "Cerebras", "env_var": "CEREBRAS_API_KEYS", "base_url": "https://api.cerebras.ai/v1", "fallback_model": "llama-3.3-70b", "context_limit": 128000},
-            {"provider": "Gemini", "env_var": "GEMINI_API_KEYS", "base_url": None, "fallback_model": "gemini-2.5-flash", "context_limit": 1000000},
+            {"provider": "Gemini", "env_var": "GEMINI_API_KEYS", "base_url": None, "fallback_model": "gemini-3.6-flash", "context_limit": 1000000},
             {"provider": "Mistral", "env_var": "MISTRAL_API_KEYS", "base_url": "https://api.mistral.ai/v1", "fallback_model": "codestral-latest", "context_limit": 32000},
             {"provider": "OpenRouter", "env_var": "OPENROUTER_API_KEYS", "base_url": "https://openrouter.ai/api/v1", "fallback_model": "openrouter/auto", "context_limit": 64000},
         ]
@@ -110,7 +110,7 @@ class CloudMeshRouter:
                 for m in models:
                     name = getattr(m, "name", "")
                     actions = getattr(m, "supported_actions", [])
-                    if name and "generateContent" in actions and "flash" in name.lower() and "vision" not in name.lower():
+                    if name and "generateContent" in actions and "flash" in name.lower() and "vision" not in name.lower() and "omni" not in name.lower() and "preview" not in name.lower():
                         flash_models.append(name.replace("models/", ""))
                 
                 if flash_models:
