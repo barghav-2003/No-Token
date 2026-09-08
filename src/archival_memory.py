@@ -13,6 +13,7 @@ from src.models import Turn
 class ArchivalMemoryManager:
     """Manages local vector storage using ChromaDB for long-term memory retrieval."""
 
+
     def __init__(self, db_dir: str = "./chroma_db", collection_name: str = "archival_memory"):
         self.db_dir = Path(db_dir)
         self.db_dir.mkdir(parents=True, exist_ok=True)
