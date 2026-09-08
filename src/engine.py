@@ -251,7 +251,8 @@ class CloudMeshRouter:
                     client = openai.OpenAI(api_key=key, base_url=tier.get("base_url"))
                     response = client.chat.completions.create(
                         model=model,
-                        messages=[{"role": "user", "content": prompt}]
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=4096
                     )
                     response_text = response.choices[0].message.content or ""
                 
@@ -294,9 +295,15 @@ class CloudMeshRouter:
                     first_chunk = next(iterator)
                     
                     def gen(c, i, fc):
-                        if fc.text: yield fc.text
-                        for chunk in i:
-                            if chunk.text: yield chunk.text
+                        try:
+                            if fc.text:
+                                yield fc.text
+                            for chunk in i:
+                                if chunk.text:
+                                    yield chunk.text
+                        except Exception as err:
+                            logging.error(f"[Gemini] Stream interrupted mid-flight: {err}")
+                            yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
                     metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
                     return gen(client, iterator, first_chunk), payload, metadata
@@ -305,17 +312,28 @@ class CloudMeshRouter:
                     response_stream = client.chat.completions.create(
                         model=model,
                         messages=[{"role": "user", "content": prompt}],
-                        stream=True
+                        stream=True,
+                        max_tokens=4096
                     )
                     iterator = iter(response_stream)
+                    first_chunk = next(iterator)
+                    first_content = ""
+                    if first_chunk.choices and first_chunk.choices[0].delta.content:
+                        first_content = first_chunk.choices[0].delta.content
                     
-                    def generate():
-                        for chunk in response_stream:
-                            if chunk.choices and chunk.choices[0].delta.content:
-                                yield chunk.choices[0].delta.content
+                    def generate(it, init_content, p_name):
+                        try:
+                            if init_content:
+                                yield init_content
+                            for chunk in it:
+                                if chunk.choices and chunk.choices[0].delta.content:
+                                    yield chunk.choices[0].delta.content
+                        except Exception as err:
+                            logging.error(f"[{p_name}] Stream interrupted mid-flight: {err}")
+                            yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
                     metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
-                    return generate(), payload, metadata
+                    return generate(iterator, first_content, provider), payload, metadata
                 
             except Exception as e:
                 self._handle_api_error(e, provider, key, key_suffix)
