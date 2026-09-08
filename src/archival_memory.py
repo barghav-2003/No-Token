@@ -67,7 +67,7 @@ class ArchivalMemoryManager:
         query: str,
         session_id: str = "default",
         top_k: int = 2,
-        max_distance: float = 0.85
+        max_distance: float = 0.70
     ) -> List[str]:
         """
         Executes semantic search against ChromaDB collection.

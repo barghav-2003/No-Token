@@ -72,7 +72,11 @@ class DynamicPromptAssembler:
         if working_memory.map_index:
             sys_body += f"\n\n{working_memory.map_index}"
             
-        grounding_instruction = "Base answers strictly on the provided XML tags. Do not confuse past transcript content with current UI session prompts. If information is missing, explicitly state so."
+        grounding_instruction = (
+            "You are an intelligent, context-aware AI assistant operating in dual mode:\n"
+            "1. TRANSCRIPT & FILE INQUIRIES: If the user's query refers to, asks about, or is based on the uploaded transcript or past conversation (e.g., questions about the document, previous topics, or specific details from the chat), answer STRICTLY based on the provided <retrieved_archival_context> and <recent_ui_session_history>. Do not hallucinate or invent details not present in the context. If specific information asked about the transcript is missing, explicitly state that it was not found in the uploaded text.\n"
+            "2. GENERAL KNOWLEDGE & OPEN INQUIRIES: If the user asks a general question, advice, or topic unrelated to the uploaded transcript or past discussion (e.g., diet plans, coding help, creative writing, science, or general explanations), answer normally, helpfully, and comprehensively using your full pre-trained capabilities as an expert AI assistant. Do NOT claim you cannot answer or apologize simply because the topic was not mentioned in the transcript."
+        )
         sys_body += f"\n\n{grounding_instruction}"
 
         system_instruction = f"<system_working_rules>\n{sys_body}\n</system_working_rules>"
