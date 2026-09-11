@@ -1,0 +1,21 @@
+# Environment & Secret Keys
+.env
+*.env.local
+
+# Local runtime state & Vector DB
+chroma_db/
+local_state/
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -23,13 +23,15 @@ class Turn(BaseModel):
     """Complete conversational turn (User query + Assistant response)."""
     turn_id: Optional[str] = Field(default=None)
     turn_index: Optional[int] = Field(default=None, description="Sequential index of the turn in the session.")
+    session_id: str = Field(default="default", description="Session identifier for multi-session isolation.")
     user_message: str = Field(description="User prompt for this turn.")
     assistant_message: str = Field(description="Assistant response for this turn.")
     timestamp: str = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat())
 
     def model_post_init(self, __context):
         if not self.turn_id:
-            raw_content = f"{self.user_message.strip()}||{self.assistant_message.strip()}"
+            idx_prefix = f"{self.turn_index}||" if self.turn_index is not None else ""
+            raw_content = f"{self.session_id}||{idx_prefix}{self.user_message.strip()}||{self.assistant_message.strip()}"
             self.turn_id = hashlib.md5(raw_content.encode('utf-8')).hexdigest()
 
     def to_transcript_format(self) -> str:

@@ -8,6 +8,7 @@ import time
 import logging
 import urllib.request
 import json
+import threading
 from typing import Optional, Tuple, Dict, List, Any
 # pyrefly: ignore [missing-import]
 import openai
@@ -32,8 +33,10 @@ class CloudMeshRouter:
         # Tiered list of providers (Quality & Speed prioritized)
         self.tiers = [
             {"provider": "Groq", "env_var": "GROQ_API_KEYS", "base_url": "https://api.groq.com/openai/v1", "fallback_model": "llama-3.3-70b-versatile", "context_limit": 128000},
+            {"provider": "OpenAI", "env_var": "OPENAI_API_KEYS", "base_url": "https://api.openai.com/v1", "fallback_model": "gpt-4o-mini", "context_limit": 128000},
+            {"provider": "xAI", "env_var": "GROK_API_KEYS", "base_url": "https://api.x.ai/v1", "fallback_model": "grok-2-latest", "context_limit": 131072},
             {"provider": "Cerebras", "env_var": "CEREBRAS_API_KEYS", "base_url": "https://api.cerebras.ai/v1", "fallback_model": "llama-3.3-70b", "context_limit": 128000},
-            {"provider": "Gemini", "env_var": "GEMINI_API_KEYS", "base_url": None, "fallback_model": "gemini-3.6-flash", "context_limit": 1000000},
+            {"provider": "Gemini", "env_var": "GEMINI_API_KEYS", "base_url": None, "fallback_model": "gemini-2.0-flash", "context_limit": 1000000},
             {"provider": "Mistral", "env_var": "MISTRAL_API_KEYS", "base_url": "https://api.mistral.ai/v1", "fallback_model": "codestral-latest", "context_limit": 32000},
             {"provider": "OpenRouter", "env_var": "OPENROUTER_API_KEYS", "base_url": "https://openrouter.ai/api/v1", "fallback_model": "openrouter/auto", "context_limit": 64000},
         ]
@@ -41,6 +44,8 @@ class CloudMeshRouter:
         self.key_status = {} # Map of (provider, key) -> {"status": "Online", "cooldown_until": 0.0}
         self.provider_keys = {} # Map of provider -> list of keys
         self.discovered_models = {} # Map of provider -> active model
+        self._discovery_lock = threading.Lock()
+        self._discovery_in_progress = {}
         self.reload_keys_from_env()
 
     def reload_keys_from_env(self, custom_keys: Optional[Dict[str, str]] = None):
@@ -69,10 +74,12 @@ class CloudMeshRouter:
             
             # Perform Model Auto-Discovery
             if keys:
-                import threading
-                t = threading.Thread(target=self._discover_model, args=(tier, keys[0]))
-                t.daemon = True
-                t.start()
+                with self._discovery_lock:
+                    if not self._discovery_in_progress.get(provider, False):
+                        self._discovery_in_progress[provider] = True
+                        t = threading.Thread(target=self._discover_model, args=(tier, keys[0]))
+                        t.daemon = True
+                        t.start()
             else:
                 self.discovered_models[provider] = tier["fallback_model"]
 
@@ -116,7 +123,7 @@ class CloudMeshRouter:
                         flash_models.append(name.replace("models/", ""))
                 
                 if flash_models:
-                    preferred_gemini = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+                    preferred_gemini = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
                     best_gemini = flash_models[0]
                     for preferred in preferred_gemini:
                         if preferred in flash_models:
@@ -124,6 +131,22 @@ class CloudMeshRouter:
                             break
                     self.discovered_models[provider] = best_gemini
                     logging.info(f"[Gemini] Auto-discovered model: {best_gemini}")
+                    return
+
+            elif provider == "OpenAI":
+                client = openai.OpenAI(api_key=key, base_url=base_url)
+                models = client.models.list()
+                model_ids = [m.id for m in models.data]
+                
+                if model_ids:
+                    preferred_openai = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3-mini", "o1", "gpt-4"]
+                    best_openai = fallback
+                    for pref in preferred_openai:
+                        if pref in model_ids:
+                            best_openai = pref
+                            break
+                    self.discovered_models[provider] = best_openai
+                    logging.info(f"[OpenAI] Auto-discovered model: {best_openai}")
                     return
 
             else:
@@ -146,8 +169,10 @@ class CloudMeshRouter:
 
         except Exception as e:
             logging.warning(f"[{provider}] Auto-discovery failed: {e}. Using fallback {fallback}")
-            
-        self.discovered_models[provider] = fallback
+            self.discovered_models[provider] = fallback
+        finally:
+            with self._discovery_lock:
+                self._discovery_in_progress[provider] = False
 
     def _get_next_available_key(self, required_tokens: int = 0) -> Tuple[Optional[dict], Optional[str]]:
         """Returns (tier_dict, key) for the next available key in the mesh."""
@@ -228,6 +253,8 @@ class CloudMeshRouter:
 
         if provider == "Groq" and key.startswith("xai-"):
             logging.warning(f"[Groq] Key ...{key_suffix} starts with 'xai-' (xAI Grok key), not a Groq key (which starts with 'gsk_'). Please use a valid Groq key.")
+        elif provider == "Gemini" and key.startswith("AQ."):
+            logging.warning(f"[Gemini] Key ...{key_suffix} starts with 'AQ.', which appears to be a Google Cloud OAuth token instead of a Google AI Studio API key (starts with 'AIzaSy').")
 
         if is_auth_or_quota_exhausted or fail_count >= 3:
             logging.warning(f"[{provider}] Authentication or Hard Quota Exhaustion for key ...{key_suffix} (fails: {fail_count}): {e}. Marking as Exhausted.")
@@ -266,7 +293,9 @@ class CloudMeshRouter:
                 
                 # Dynamically assemble the exact payload for this specific model's context limit
                 context_limit = tier.get("context_limit", 8000)
-                payload = DynamicPromptAssembler.assemble(**payload_kwargs, max_prompt_tokens=int(context_limit * 0.9))
+                safety_margin = 0.85 if provider in ("Gemini", "Mistral") else 0.90
+                target_max_tokens = int(context_limit * safety_margin)
+                payload = DynamicPromptAssembler.assemble(**payload_kwargs, max_prompt_tokens=target_max_tokens)
                 prompt = payload.full_prompt
                 
                 if provider == "Gemini":
@@ -278,15 +307,31 @@ class CloudMeshRouter:
                     response_text = response.text or ""
                 else:
                     client = openai.OpenAI(api_key=key, base_url=tier.get("base_url"))
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=4096
-                    )
+                    try:
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=4096
+                        )
+                    except Exception as ex:
+                        if "max_completion_tokens" in str(ex).lower():
+                            response = client.chat.completions.create(
+                                model=model,
+                                messages=[{"role": "user", "content": prompt}],
+                                max_completion_tokens=4096
+                            )
+                        else:
+                            raise ex
                     response_text = response.choices[0].message.content or ""
                 
                 self.key_status.get((provider, key), {})["failure_count"] = 0
-                metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
+                metadata = {
+                    "provider": provider,
+                    "model": model,
+                    "key_suffix": key_suffix,
+                    "context_limit": context_limit,
+                    "safety_margin": safety_margin
+                }
                 return response_text, payload, metadata
                 
             except Exception as e:
@@ -312,7 +357,9 @@ class CloudMeshRouter:
                 logging.info(f"Attempting streaming generation with {provider} ({model}) using key ending in ...{key_suffix}")
                 
                 context_limit = tier.get("context_limit", 8000)
-                payload = DynamicPromptAssembler.assemble(**payload_kwargs, max_prompt_tokens=int(context_limit * 0.9))
+                safety_margin = 0.85 if provider in ("Gemini", "Mistral") else 0.90
+                target_max_tokens = int(context_limit * safety_margin)
+                payload = DynamicPromptAssembler.assemble(**payload_kwargs, max_prompt_tokens=target_max_tokens)
                 prompt = payload.full_prompt
                 
                 if provider == "Gemini":
@@ -336,16 +383,33 @@ class CloudMeshRouter:
                             yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
                     self.key_status.get((provider, key), {})["failure_count"] = 0
-                    metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
+                    metadata = {
+                        "provider": provider,
+                        "model": model,
+                        "key_suffix": key_suffix,
+                        "context_limit": context_limit,
+                        "safety_margin": safety_margin
+                    }
                     return gen(client, iterator, first_chunk), payload, metadata
                 else:
                     client = openai.OpenAI(api_key=key, base_url=tier.get("base_url"))
-                    response_stream = client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": prompt}],
-                        stream=True,
-                        max_tokens=4096
-                    )
+                    try:
+                        response_stream = client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=True,
+                            max_tokens=4096
+                        )
+                    except Exception as ex:
+                        if "max_completion_tokens" in str(ex).lower():
+                            response_stream = client.chat.completions.create(
+                                model=model,
+                                messages=[{"role": "user", "content": prompt}],
+                                stream=True,
+                                max_completion_tokens=4096
+                            )
+                        else:
+                            raise ex
                     iterator = iter(response_stream)
                     first_chunk = next(iterator)
                     first_content = ""
@@ -364,7 +428,13 @@ class CloudMeshRouter:
                             yield f"\n\n⚠️ *[Stream connection interrupted: {err}]*"
                     
                     self.key_status.get((provider, key), {})["failure_count"] = 0
-                    metadata = {"provider": provider, "model": model, "key_suffix": key_suffix, "context_limit": context_limit}
+                    metadata = {
+                        "provider": provider,
+                        "model": model,
+                        "key_suffix": key_suffix,
+                        "context_limit": context_limit,
+                        "safety_margin": safety_margin
+                    }
                     return generate(iterator, first_content, provider), payload, metadata
                 
             except Exception as e:
@@ -391,6 +461,7 @@ class HybridMemoryEngine:
 
         # Initialize Archival Store & Short-Term Buffer
         self.archival_memory = archival_manager or ArchivalMemoryManager(db_dir=db_dir)
+
         self.short_term_memory = ShortTermMemoryBuffer(
             max_turns=short_term_window,
             archival_manager=self.archival_memory
@@ -398,6 +469,8 @@ class HybridMemoryEngine:
 
         # Initialize Cloud Mesh Router
         self.mesh_router = mesh_router or CloudMeshRouter()
+        
+        self.current_turn_index = 0
 
     def ingest_transcript(self, raw_transcript: str, session_id: str = "default") -> int:
         """
@@ -421,6 +494,7 @@ class HybridMemoryEngine:
             for t in turns:
                 self.short_term_memory.add_turn(t, session_id=session_id)
 
+        self.current_turn_index = len(turns)
         return len(turns)
 
     def process_turn(self, user_input: str, session_id: str = "default") -> Tuple[str, ContextPayload, dict]:
@@ -433,20 +507,18 @@ class HybridMemoryEngine:
             if new_rule:
                 self.working_memory.rules.append(new_rule)
                 
-        global_keywords = ["list all", "overview", "summary", "topics", "discussed"]
-        intent = "SPECIFIC_INTENT"
-        for kw in global_keywords:
-            if kw in user_input.lower():
-                intent = "GLOBAL_INTENT"
-                break
+        global_keywords = ["list all", "overview", "summary", "topics", "discussed", "all requirements"]
+        is_global = any(kw in user_input.lower() for kw in global_keywords)
                 
-        retrieved_snippets = []
-        if intent == "SPECIFIC_INTENT":
-            retrieved_snippets = self.archival_memory.search_relevant(
-                query=user_input, 
-                session_id=session_id, 
-                top_k=2
-            )
+        # Always perform retrieval, but increase top_k for broad "global" queries
+        # so that we capture a wider slice of the conversation.
+        top_k_retrieval = 4 if is_global else 2
+        
+        retrieved_snippets = self.archival_memory.search_relevant(
+            query=user_input, 
+            session_id=session_id, 
+            top_k=top_k_retrieval
+        )
 
         history = self.short_term_memory.get_history()
 
@@ -462,7 +534,12 @@ class HybridMemoryEngine:
         response_text, payload, metadata = self.mesh_router.generate_content(payload_kwargs, required_tokens)
         metadata["token_count"] = DynamicPromptAssembler._count_tokens(payload.full_prompt)
 
-        new_turn = Turn(user_message=user_input, assistant_message=response_text)
+        self.current_turn_index += 1
+        new_turn = Turn(
+            user_message=user_input, 
+            assistant_message=response_text,
+            turn_index=self.current_turn_index
+        )
         self.short_term_memory.add_turn(new_turn, session_id=session_id)
 
         return response_text, payload, metadata
@@ -477,20 +554,18 @@ class HybridMemoryEngine:
             if new_rule:
                 self.working_memory.rules.append(new_rule)
                 
-        global_keywords = ["list all", "overview", "summary", "topics", "discussed"]
-        intent = "SPECIFIC_INTENT"
-        for kw in global_keywords:
-            if kw in user_input.lower():
-                intent = "GLOBAL_INTENT"
-                break
+        global_keywords = ["list all", "overview", "summary", "topics", "discussed", "all requirements"]
+        is_global = any(kw in user_input.lower() for kw in global_keywords)
                 
-        retrieved_snippets = []
-        if intent == "SPECIFIC_INTENT":
-            retrieved_snippets = self.archival_memory.search_relevant(
-                query=user_input, 
-                session_id=session_id, 
-                top_k=2
-            )
+        # Always perform retrieval, but increase top_k for broad "global" queries
+        # so that we capture a wider slice of the conversation.
+        top_k_retrieval = 4 if is_global else 2
+        
+        retrieved_snippets = self.archival_memory.search_relevant(
+            query=user_input, 
+            session_id=session_id, 
+            top_k=top_k_retrieval
+        )
 
         history = self.short_term_memory.get_history()
 
@@ -508,11 +583,22 @@ class HybridMemoryEngine:
 
         def wrapper():
             full_response = ""
+            stream_failed = False
             for chunk in chunk_gen:
+                if "⚠️ *[Stream connection interrupted" in chunk:
+                    stream_failed = True
                 full_response += chunk
                 yield chunk
             
-            new_turn = Turn(user_message=user_input, assistant_message=full_response)
-            self.short_term_memory.add_turn(new_turn, session_id=session_id)
+            if not stream_failed:
+                self.current_turn_index += 1
+                new_turn = Turn(
+                    user_message=user_input, 
+                    assistant_message=full_response,
+                    turn_index=self.current_turn_index
+                )
+                self.short_term_memory.add_turn(new_turn, session_id=session_id)
+            else:
+                logging.warning("Stream failed mid-flight. Not saving turn to history to prevent memory poisoning.")
 
         return wrapper(), payload, metadata
