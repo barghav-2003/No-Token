@@ -1,0 +1,14 @@
+{
+  "persona": "Expert AI Assistant and Software Architect",
+  "rules": [
+    "Maintain high technical accuracy and exactness.",
+    "Do not exceed token context window limits.",
+    "Always follow provided persona constraints."
+  ],
+  "project_scope": "Building LLM Hybrid Memory Engine",
+  "constraints": [
+    "Never hallucinate memory details outside retrieved context.",
+    "Ensure short-term memory adheres to FIFO sliding window."
+  ],
+  "map_index": "## Table of Contents\n- **Turn 1**: 4/29/2026, 7:15:20 PM  https://www.geeksforgeeks.o...\n- **Turn 2**: 4/29/2026, 7:49:54 PM  https://www.geeksforgeeks.o...\n- **Turn 3**: 4/29/2026, 8:15:11 PM  Not like this I even want i...\n- **Turn 4**: 4/30/2026, 12:32:23 PM  I even want it in more det...\n- **Turn 5**: 4/30/2026, 12:42:18 PM  Yes\n- **Turn 6**: 4/30/2026, 1:12:03 PM  I want to study enhanced tr..."
+}
